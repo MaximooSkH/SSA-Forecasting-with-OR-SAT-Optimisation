@@ -1,0 +1,36 @@
+﻿# JetBrains Rider / IntelliJ
+.idea/
+*.iml
+shelf/
+workspace.xml
+modules.xml
+contentModel.xml
+projectSettingsUpdater.xml
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.DotSettings.user
+
+# Build outputs
+bin/
+obj/
+[Bb]uild/
+[Ll]og/
+
+# NuGet
+packages/
+*.nupkg
+project.lock.json
+.nuget/
+
+# WebView2 & other large binaries
+**/WebView2*/**
+**/msedge.dll
+**/*.msi
+**/*.cab
+
+# Misc
+*.cache
+*.orig
