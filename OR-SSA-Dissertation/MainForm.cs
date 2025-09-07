@@ -1,11 +1,9 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
-using System.Linq;
-using Microsoft.Web.WebView2.WinForms;
-using System.Threading.Tasks;
 
 namespace OR_SSA_Dissertation
 {
@@ -17,16 +15,8 @@ namespace OR_SSA_Dissertation
         private FlowLayoutPanel buttonPanel;
         private Label lblLog;
         private RichTextBox rtbLog;
-        
-        private TabControl rightTabs;          
-        private TabPage tabLog;                
-        private TabPage tabMath;               
-        private WebView2 mathView;             
-        private string mathHtml;     
-        
-        /// <summary>
-        /// Plans to make the output box Latex complied to print Math symbols
-        /// </summary>
+
+        private bool useExperimental = false;
 
         public MainForm()
         {
@@ -93,11 +83,10 @@ namespace OR_SSA_Dissertation
             };
 
             var btnGenerate = CreateButton("Generate Data", (s, e) => RunSolverAndPlot());
-            var btnRun      = CreateButton("Run SSA", (s, e) => AppendLog("SSA run placeholder..."));
-            var btnImport = CreateButton("Import CSV", (s, e) => ImportCsvAndRun());
+            var btnRun      = CreateButton("Run SSA (OR-Tools)", (s, e) => RunSolverAndPlot());
+            var btnImport   = CreateButton("Import CSV", (s, e) => ImportCsvAndRun());
+
             buttonPanel.Controls.Add(btnImport);
-
-
             buttonPanel.Controls.Add(btnGenerate);
             buttonPanel.Controls.Add(btnRun);
 
@@ -179,7 +168,45 @@ namespace OR_SSA_Dissertation
             Invalidate();
         }
 
-        private bool useExperimental = false;
+        // === OR-SSA helper ===
+        private double[] OrSsaReconstruct(
+            SsaResult ssa,
+            out ComponentSelector.SelectionResult selOut,
+            int rMin = 2, int rMax = 6, double lambda = 0.10,
+            bool lockAdjacentPairs = true, int timeLimitSec = 5)
+        {
+            var q     = SsaMetrics.ComputeContributions(ssa.SingularValues);
+            var elems = SsaReconstruction.ElementaryReconstructions(ssa);
+            var w     = SsaMetrics.Compute1DWeights(ssa.N, ssa.L, ssa.K);
+            var R     = SsaMetrics.WCorrelation(elems, w);
+
+            var absR = new double[ssa.DRank, ssa.DRank];
+            for (int i = 0; i < ssa.DRank; i++)
+                for (int j = 0; j < ssa.DRank; j++)
+                    absR[i, j] = Math.Abs(R[i, j]);
+
+            Tuple<int,int>[] locks = Array.Empty<Tuple<int,int>>();
+            if (lockAdjacentPairs && ssa.DRank >= 2)
+            {
+                var list = new System.Collections.Generic.List<Tuple<int,int>>();
+                for (int i = 0; i + 1 < ssa.DRank; i += 2)
+                    list.Add(Tuple.Create(i, i + 1));
+                locks = list.ToArray();
+            }
+
+            var sel = ComponentSelector.SelectComponents(q, absR, locks, rMin, rMax, lambda, timeLimitSec);
+
+            var recon = new double[ssa.N];
+            for (int i = 0; i < ssa.DRank; i++)
+                if (sel.Keep[i] == 1)
+                {
+                    var comp = elems[i];
+                    for (int t = 0; t < ssa.N; t++) recon[t] += comp[t];
+                }
+
+            selOut = sel;
+            return recon;
+        }
 
         private void RunSolverAndPlot()
         {
@@ -191,49 +218,49 @@ namespace OR_SSA_Dissertation
 
             if (!useExperimental)
             {
-                // Clean sine + trend + small noise
                 for (int i = 0; i < N; i++)
                 {
-                    series[i] = 0.05 * i                                 // trend
-                              + 3.0 * Math.Sin(2 * Math.PI * i / 20.0)  // sine
-                              + rand.NextDouble() * 0.5;                // small noise
+                    series[i] = 0.05 * i
+                              + 3.0 * Math.Sin(2 * Math.PI * i / 20.0)
+                              + rand.NextDouble() * 0.5;
                 }
             }
             else
             {
-                // Experimental chaos dataset
                 for (int i = 0; i < N; i++)
                 {
                     double t = i;
-
                     double trend = (t < 100) ? 0.02 * t : 0.02 * 100 + 0.05 * (t - 100);
-
-                    double wave = 2.0 * Math.Sin(2 * Math.PI * t / 40.0)   // slow sine
-                                + 0.8 * Math.Cos(2 * Math.PI * t / 10.0);  // fast cosine
-
+                    double wave = 2.0 * Math.Sin(2 * Math.PI * t / 40.0)
+                                + 0.8 * Math.Cos(2 * Math.PI * t / 10.0);
                     double noise = (t < 100 ? 0.3 : 1.0) * (rand.NextDouble() - 0.5);
-
                     double outlier = (rand.NextDouble() < 0.03) ? rand.NextDouble() * 10.0 - 5.0 : 0.0;
-
                     series[i] = trend + wave + noise + outlier;
                 }
             }
 
-            // Toggle mode for next button click
             useExperimental = !useExperimental;
 
-            // Decompose
             int L = N / 2;
             var ssa = SsaDecomposition.Decompose(series, L);
 
-            // Reconstruct (first 2 comps)
-            var comps = SsaReconstruction.ElementaryReconstructions(ssa);
-            double[] recon = new double[ssa.N];
-            for (int k = 0; k < Math.Min(2, comps.Length); k++)
-            for (int i = 0; i < ssa.N; i++)
-                recon[i] += comps[k][i];
+            double[] recon;
+            ComponentSelector.SelectionResult sel;
+            try
+            {
+                recon = OrSsaReconstruct(
+                    ssa,
+                    out sel,
+                    rMin: 2, rMax: 6, lambda: 0.10, lockAdjacentPairs: true, timeLimitSec: 5);
 
-            // Plot
+                AppendLog($"CP-SAT: {sel.Status} | Obj={sel.Objective:F6} | Conflicts={sel.NumConflicts} | Branches={sel.NumBranches} | {sel.WallTimeSec:F3}s");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.ToString(), "SSA Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             chartMain.Series.Clear();
 
             var sOriginal = new Series("Original")
@@ -242,7 +269,7 @@ namespace OR_SSA_Dissertation
                 BorderWidth = 2,
                 Color = Color.SteelBlue
             };
-            var sRecon = new Series("Reconstruction")
+            var sRecon = new Series("OR-SSA Reconstruction")
             {
                 ChartType = SeriesChartType.Line,
                 BorderWidth = 2,
@@ -258,11 +285,95 @@ namespace OR_SSA_Dissertation
             chartMain.Series.Add(sOriginal);
             chartMain.Series.Add(sRecon);
 
-            AppendLog($"Solver finished. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
+            AppendLog($"Finished. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
         }
 
+        private void ImportCsvAndRun()
+        {
+            using (var ofd = new OpenFileDialog
+            {
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+            })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
 
+                try
+                {
+                    var lines = System.IO.File.ReadAllLines(ofd.FileName);
+                    var values = new System.Collections.Generic.List<double>();
 
+                    foreach (var line in lines.Skip(1)) // skip header if present
+                    {
+                        var parts = line.Split(',');
+                        if (parts.Length >= 2 && double.TryParse(parts[1], out double val))
+                            values.Add(val);
+                    }
+
+                    if (values.Count > 0)
+                    {
+                        RunSsaWithSeries(values.ToArray());
+                    }
+                    else
+                    {
+                        AppendLog("CSV contained no usable data.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"Error reading CSV: {ex.Message}");
+                }
+            }
+        }
+
+        private void RunSsaWithSeries(double[] series)
+        {
+            int N = series.Length;
+            int L = Math.Max(2, N / 2);
+            var ssa = SsaDecomposition.Decompose(series, L);
+
+            double[] recon;
+            ComponentSelector.SelectionResult sel;
+            try
+            {
+                recon = OrSsaReconstruct(
+                    ssa,
+                    out sel,
+                    rMin: 2, rMax: 6, lambda: 0.10, lockAdjacentPairs: true, timeLimitSec: 5);
+
+                AppendLog($"CP-SAT: {sel.Status} | Obj={sel.Objective:F6} | Conflicts={sel.NumConflicts} | Branches={sel.NumBranches} | {sel.WallTimeSec:F3}s");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.ToString(), "SSA Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            chartMain.Series.Clear();
+
+            var sOriginal = new Series("Original")
+            {
+                ChartType = SeriesChartType.Line,
+                BorderWidth = 2,
+                Color = Color.SteelBlue
+            };
+            var sRecon = new Series("OR-SSA Reconstruction")
+            {
+                ChartType = SeriesChartType.Line,
+                BorderWidth = 2,
+                Color = Color.IndianRed
+            };
+
+            for (int t = 0; t < ssa.N; t++)
+            {
+                sOriginal.Points.AddXY(t, series[t]);
+                sRecon.Points.AddXY(t, recon[t]);
+            }
+
+            chartMain.Series.Add(sOriginal);
+            chartMain.Series.Add(sRecon);
+
+            AppendLog($"Imported CSV and ran OR-SSA. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
+        }
 
         public void AppendLog(string line)
         {
@@ -271,81 +382,5 @@ namespace OR_SSA_Dissertation
             rtbLog.SelectionStart = rtbLog.TextLength;
             rtbLog.ScrollToCaret();
         }
-        
-        private void ImportCsvAndRun()
-{
-    using (var ofd = new OpenFileDialog())
-    {
-        ofd.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*";
-        if (ofd.ShowDialog() == DialogResult.OK)
-        {
-            try
-            {
-                var lines = System.IO.File.ReadAllLines(ofd.FileName);
-                var values = new System.Collections.Generic.List<double>();
-
-                foreach (var line in lines.Skip(1)) // skip header if present
-                {
-                    var parts = line.Split(',');
-                    if (parts.Length >= 2 && double.TryParse(parts[1], out double val))
-                        values.Add(val);
-                }
-
-                if (values.Count > 0)
-                {
-                    RunSsaWithSeries(values.ToArray());
-                }
-                else
-                {
-                    AppendLog("CSV contained no usable data.");
-                }
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"Error reading CSV: {ex.Message}");
-            }
-        }
-    }
-}
-
-private void RunSsaWithSeries(double[] series)
-{
-    int N = series.Length;
-    int L = N / 2;
-    var ssa = SsaDecomposition.Decompose(series, L);
-    var comps = SsaReconstruction.ElementaryReconstructions(ssa);
-
-    double[] recon = new double[ssa.N];
-    for (int k = 0; k < Math.Min(2, comps.Length); k++)
-    for (int i = 0; i < ssa.N; i++)
-        recon[i] += comps[k][i];
-
-    chartMain.Series.Clear();
-
-    var sOriginal = new Series("Original")
-    {
-        ChartType = SeriesChartType.Line,
-        BorderWidth = 2,
-        Color = Color.SteelBlue
-    };
-    var sRecon = new Series("Reconstruction")
-    {
-        ChartType = SeriesChartType.Line,
-        BorderWidth = 2,
-        Color = Color.IndianRed
-    };
-
-    for (int t = 0; t < ssa.N; t++)
-    {
-        sOriginal.Points.AddXY(t, series[t]);
-        sRecon.Points.AddXY(t, recon[t]);
-    }
-
-    chartMain.Series.Add(sOriginal);
-    chartMain.Series.Add(sRecon);
-
-    AppendLog($"Imported CSV and ran SSA. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
-}
-
     }
 }

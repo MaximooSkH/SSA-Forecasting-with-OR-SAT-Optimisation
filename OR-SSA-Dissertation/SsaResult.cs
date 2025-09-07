@@ -97,8 +97,7 @@ namespace OR_SSA_Dissertation
             for (int k = 0; k < N; k++) if (c[k] > 0) y[k] /= c[k];
             return y;
         }
-    }
-
+    }  
     public static class SsaMetrics
     {
         public static double[] ComputeContributions(double[] sigmas)
