@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
@@ -43,32 +44,8 @@ namespace OR_SSA_Dissertation
 
             RunSolverAndPlot();
         }
-        
-        // 1) Add this helper to MainForm
-        private void AutoScaleChart()
-        {
-            if (chartMain.ChartAreas.Count == 0) return;
-            var area = chartMain.ChartAreas["main"];
 
-            // Clear any previous manual limits
-            area.AxisX.Minimum = double.NaN;
-            area.AxisX.Maximum = double.NaN;
-            area.AxisY.Minimum = double.NaN;
-            area.AxisY.Maximum = double.NaN;
-
-            // If you ever used zooming, reset it so autoscale can take effect
-            area.AxisX.ScaleView.ZoomReset(0);
-            area.AxisY.ScaleView.ZoomReset(0);
-
-            // Optional: removes left/right whitespace
-            area.AxisX.IsMarginVisible = false;
-
-            // Recompute based on current data
-            area.RecalculateAxesScale();
-
-            chartMain.Invalidate();
-        }
-
+        ////////////////UI helpers ////////////////////
 
         private void BuildUi()
         {
@@ -81,7 +58,7 @@ namespace OR_SSA_Dissertation
             };
             Controls.Add(leftPanel);
 
-            // Right (logger)
+            // Right (log)
             rightPanel = new Panel
             {
                 Dock = DockStyle.Right,
@@ -108,12 +85,22 @@ namespace OR_SSA_Dissertation
                 BackColor = Color.White
             };
 
-            var btnGenerate = CreateButton("Generate Data", (s, e) => RunSolverAndPlot());
+            var btnBenchmark = CreateButton("Benchmark Test", (s, e) =>
+            {
+                var form = new BenchmarkForm();
+                form.Show(); 
+            });
+            var btnNoise = CreateButton("Noise Test", (s, e) =>
+            {
+                var form = new NoiseForm();
+                form.Show(); 
+            });
             var btnRun      = CreateButton("Run SSA (OR-Tools)", (s, e) => RunSolverAndPlot());
             var btnImport   = CreateButton("Import CSV", (s, e) => ImportCsvAndRun());
 
             buttonPanel.Controls.Add(btnImport);
-            buttonPanel.Controls.Add(btnGenerate);
+            buttonPanel.Controls.Add(btnNoise);
+            buttonPanel.Controls.Add(btnBenchmark);
             buttonPanel.Controls.Add(btnRun);
 
             leftPanel.Controls.Add(chartMain);
@@ -194,7 +181,50 @@ namespace OR_SSA_Dissertation
             Invalidate();
         }
 
-        // === OR-SSA helper ===
+        private void AutoScaleChart()
+        {
+            if (chartMain.ChartAreas.Count == 0) return;
+            var area = chartMain.ChartAreas["main"];
+
+            // Clear limits
+            area.AxisX.Minimum = double.NaN;
+            area.AxisX.Maximum = double.NaN;
+            area.AxisY.Minimum = double.NaN;
+            area.AxisY.Maximum = double.NaN;
+
+            // Reset view if zoomed
+            area.AxisX.ScaleView.ZoomReset(0);
+            area.AxisY.ScaleView.ZoomReset(0);
+            area.AxisX.IsMarginVisible = false;
+
+            area.RecalculateAxesScale();
+            chartMain.Invalidate();
+        }
+
+        // ////////////////// SSA + OR-SSA helpers //////////////////////
+
+        // Vanilla baseline selection: keep top-r components (by singular value).
+        // Returns (reconstruction, MSE vs original, wall-time seconds).
+        private (double[] recon, double mse, double sec) SsaBaselineTopR(SsaResult ssa, int r, double[] original)
+        {
+            var sw = Stopwatch.StartNew();
+
+            var elems = SsaReconstruction.ElementaryReconstructions(ssa);
+
+            var top = Enumerable.Range(0, ssa.DRank)
+                                .OrderByDescending(i => ssa.SingularValues[i])
+                                .Take(Math.Max(0, Math.Min(r, ssa.DRank)))
+                                .ToArray();
+
+            var recon = new double[ssa.N];
+            foreach (var i in top)
+                for (int t = 0; t < ssa.N; t++) recon[t] += elems[i][t];
+
+            sw.Stop();
+            return (recon, Mse(original, recon), sw.Elapsed.TotalSeconds);
+        }
+
+        // OR-SSA reconstruction using CP-SAT selector.
         private double[] OrSsaReconstruct(
             SsaResult ssa,
             out ComponentSelector.SelectionResult selOut,
@@ -234,9 +264,17 @@ namespace OR_SSA_Dissertation
             return recon;
         }
 
+        private static double Mse(double[] a, double[] b)
+        {
+            double s = 0;
+            for (int i = 0; i < a.Length; i++) { double d = a[i] - b[i]; s += d * d; }
+            return s / a.Length;
+        }
+
+        //////////////// Run + Plot /////////////////
         private void RunSolverAndPlot()
         {
-            AppendLog(useExperimental ? "Generating experimental dataset..." : "Generating sine dataset...");
+            AppendLog(useExperimental ? "Generating experimental dataset" : "Generating sine dataset");
 
             int N = 200;
             double[] series = new double[N];
@@ -264,17 +302,17 @@ namespace OR_SSA_Dissertation
                     series[i] = trend + wave + noise + outlier;
                 }
             }
-
             useExperimental = !useExperimental;
 
             int L = N / 2;
             var ssa = SsaDecomposition.Decompose(series, L);
 
-            double[] recon;
+            double[] reconOr;
             ComponentSelector.SelectionResult sel;
             try
             {
-                recon = OrSsaReconstruct(
+                // OR-SSA (CP-SAT)
+                reconOr = OrSsaReconstruct(
                     ssa,
                     out sel,
                     rMin: 2, rMax: 6, lambda: 0.10, lockAdjacentPairs: true, timeLimitSec: 5);
@@ -287,6 +325,15 @@ namespace OR_SSA_Dissertation
                 return;
             }
 
+            // Baseline SSA using same number of components as CP-SAT selected
+            int rBaseline = sel.Keep.Sum();
+            var baseRes = SsaBaselineTopR(ssa, rBaseline, series);
+            double orssaMse = Mse(series, reconOr);
+
+            AppendLog($"Baseline SSA: keep r={rBaseline} | MSE={baseRes.mse:F6} | {baseRes.sec:F3}s");
+            AppendLog($"OR-SSA      : keep r={rBaseline} | MSE={orssaMse:F6} | {sel.WallTimeSec:F3}s");
+
+            // Plot
             chartMain.Series.Clear();
 
             var sOriginal = new Series("Original")
@@ -305,12 +352,12 @@ namespace OR_SSA_Dissertation
             for (int t = 0; t < ssa.N; t++)
             {
                 sOriginal.Points.AddXY(t, series[t]);
-                sRecon.Points.AddXY(t, recon[t]);
+                sRecon.Points.AddXY(t, reconOr[t]);
             }
 
             chartMain.Series.Add(sOriginal);
             chartMain.Series.Add(sRecon);
-            AutoScaleChart(); 
+            AutoScaleChart();
 
             AppendLog($"Finished. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
         }
@@ -358,11 +405,12 @@ namespace OR_SSA_Dissertation
             int L = Math.Max(2, N / 2);
             var ssa = SsaDecomposition.Decompose(series, L);
 
-            double[] recon;
+            double[] reconOr;
             ComponentSelector.SelectionResult sel;
             try
             {
-                recon = OrSsaReconstruct(
+                // OR-SSA (CP-SAT)
+                reconOr = OrSsaReconstruct(
                     ssa,
                     out sel,
                     rMin: 2, rMax: 6, lambda: 0.10, lockAdjacentPairs: true, timeLimitSec: 5);
@@ -375,6 +423,15 @@ namespace OR_SSA_Dissertation
                 return;
             }
 
+            // Baseline SSA using same r as CP-SAT selected
+            int rBaseline = sel.Keep.Sum();
+            var baseRes = SsaBaselineTopR(ssa, rBaseline, series);
+            double orssaMse = Mse(series, reconOr);
+
+            AppendLog($"SSA    : keep r={rBaseline} | MSE={baseRes.mse:F6} | {baseRes.sec:F3}s");
+            AppendLog($"OR-SSA : keep r={rBaseline} | MSE={orssaMse:F6} | {sel.WallTimeSec:F3}s");
+
+            // Plot
             chartMain.Series.Clear();
 
             var sOriginal = new Series("Original")
@@ -393,12 +450,12 @@ namespace OR_SSA_Dissertation
             for (int t = 0; t < ssa.N; t++)
             {
                 sOriginal.Points.AddXY(t, series[t]);
-                sRecon.Points.AddXY(t, recon[t]);
+                sRecon.Points.AddXY(t, reconOr[t]);
             }
 
             chartMain.Series.Add(sOriginal);
             chartMain.Series.Add(sRecon);
-            AutoScaleChart(); 
+            AutoScaleChart();
 
             AppendLog($"Imported CSV and ran OR-SSA. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
         }

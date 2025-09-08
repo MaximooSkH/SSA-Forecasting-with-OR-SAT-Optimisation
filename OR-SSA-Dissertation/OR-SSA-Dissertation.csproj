@@ -94,6 +94,7 @@
     <Reference Include="System.Windows.Forms.DataVisualization" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="BenchmarkForm.cs" />
     <Compile Include="ComponentSelector.cs" />
     <Compile Include="CsvIo.cs" />
     <Compile Include="Form1.cs">
@@ -103,9 +104,12 @@
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
     <Compile Include="MainForm.cs" />
+    <Compile Include="NoiseForm.cs" />
+    <Compile Include="OrSsa.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Runner.cs" />
+    <Compile Include="SsaBaseline.cs" />
     <Compile Include="SsaResult.cs" />
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
