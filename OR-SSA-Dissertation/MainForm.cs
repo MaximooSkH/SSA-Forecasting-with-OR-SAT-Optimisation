@@ -43,6 +43,32 @@ namespace OR_SSA_Dissertation
 
             RunSolverAndPlot();
         }
+        
+        // 1) Add this helper to MainForm
+        private void AutoScaleChart()
+        {
+            if (chartMain.ChartAreas.Count == 0) return;
+            var area = chartMain.ChartAreas["main"];
+
+            // Clear any previous manual limits
+            area.AxisX.Minimum = double.NaN;
+            area.AxisX.Maximum = double.NaN;
+            area.AxisY.Minimum = double.NaN;
+            area.AxisY.Maximum = double.NaN;
+
+            // If you ever used zooming, reset it so autoscale can take effect
+            area.AxisX.ScaleView.ZoomReset(0);
+            area.AxisY.ScaleView.ZoomReset(0);
+
+            // Optional: removes left/right whitespace
+            area.AxisX.IsMarginVisible = false;
+
+            // Recompute based on current data
+            area.RecalculateAxesScale();
+
+            chartMain.Invalidate();
+        }
+
 
         private void BuildUi()
         {
@@ -284,6 +310,7 @@ namespace OR_SSA_Dissertation
 
             chartMain.Series.Add(sOriginal);
             chartMain.Series.Add(sRecon);
+            AutoScaleChart(); 
 
             AppendLog($"Finished. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
         }
@@ -371,6 +398,7 @@ namespace OR_SSA_Dissertation
 
             chartMain.Series.Add(sOriginal);
             chartMain.Series.Add(sRecon);
+            AutoScaleChart(); 
 
             AppendLog($"Imported CSV and ran OR-SSA. N={ssa.N}, L={ssa.L}, Rank={ssa.DRank}");
         }
